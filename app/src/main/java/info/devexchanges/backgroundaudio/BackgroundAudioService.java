@@ -27,15 +27,15 @@ import android.text.TextUtils;
 import java.io.IOException;
 import java.util.List;
 
-public class BackgroundAudioService extends MediaBrowserServiceCompat implements MediaPlayer.OnCompletionListener, AudioManager.OnAudioFocusChangeListener {
+public class BackgroundAudioService extends MediaBrowserServiceCompat implements MediaPlayer.OnCompletionListener, AudioManager.OnAudioFocusChangeListener  {
 
     private MediaPlayer mediaPlayer;
     private MediaSessionCompat mediaSessionCompat;
 
-    private BroadcastReceiver broadcastReceiver = new BroadcastReceiver() {
+    private BroadcastReceiver headPhoneReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
-            if (mediaPlayer != null && mediaPlayer.isPlaying()) {
+            if( mediaPlayer != null && mediaPlayer.isPlaying() ) {
                 mediaPlayer.pause();
             }
         }
@@ -61,8 +61,8 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
         ComponentName mediaButtonReceiver = new ComponentName(getApplicationContext(), MediaButtonReceiver.class);
         mediaSessionCompat = new MediaSessionCompat(getApplicationContext(), "Tag", mediaButtonReceiver, null);
 
-        mediaSessionCompat.setCallback(mMediaSessionCallback);
-        mediaSessionCompat.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
+        mediaSessionCompat.setCallback(mediaSessionCallback);
+        mediaSessionCompat.setFlags( MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS );
 
         Intent mediaButtonIntent = new Intent(Intent.ACTION_MEDIA_BUTTON);
         mediaButtonIntent.setClass(this, MediaButtonReceiver.class);
@@ -75,36 +75,31 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
     private void initNoisyReceiver() {
         //Handles headphones coming unplugged. cannot be done through a manifest receiver
         IntentFilter filter = new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
-        registerReceiver(broadcastReceiver, filter);
+        registerReceiver(headPhoneReceiver, filter);
     }
 
-    @Nullable
     @Override
-    public MediaBrowserServiceCompat.BrowserRoot onGetRoot(@NonNull String clientPackageName, int clientUid, @Nullable Bundle rootHints) {
-        if (TextUtils.equals(clientPackageName, getPackageName())) {
-            return new MediaBrowserServiceCompat.BrowserRoot(getString(R.string.app_name), null);
-        }
-
-        return null;
+    public void onDestroy() {
+        super.onDestroy();
+        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
+        audioManager.abandonAudioFocus(this);
+        unregisterReceiver(headPhoneReceiver);
+        mediaSessionCompat.release();
+        NotificationManagerCompat.from(this).cancel(1);
     }
 
-    //Not important for general audio service, required for class
-    @Override
-    public void onLoadChildren(@NonNull String parentId, @NonNull MediaBrowserServiceCompat.Result<List<MediaBrowserCompat.MediaItem>> result) {
-        result.sendResult(null);
-    }
-
-    private MediaSessionCompat.Callback mMediaSessionCallback = new MediaSessionCompat.Callback() {
+    private MediaSessionCompat.Callback mediaSessionCallback = new MediaSessionCompat.Callback() {
 
         @Override
         public void onPlay() {
             super.onPlay();
-            if (!successfullyRetrievedAudioFocus()) {
+            if( !successfullyRetrievedAudioFocus() ) {
                 return;
             }
 
             mediaSessionCompat.setActive(true);
             setMediaPlaybackState(PlaybackStateCompat.STATE_PLAYING);
+
             showPlayingNotification();
             mediaPlayer.start();
         }
@@ -126,14 +121,14 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
 
             try {
                 AssetFileDescriptor afd = getResources().openRawResourceFd(Integer.valueOf(mediaId));
-                if( afd == null ) {
+                if (afd == null) {
                     return;
                 }
 
                 try {
                     mediaPlayer.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
 
-                } catch( IllegalStateException e ) {
+                } catch (IllegalStateException e) {
                     mediaPlayer.release();
                     initMediaPlayer();
                     mediaPlayer.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getLength());
@@ -152,34 +147,19 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
                 e.printStackTrace();
             }
         }
-
-        @Override
-        public void onCommand(String command, Bundle extras, android.os.ResultReceiver cb) {
-            super.onCommand(command, extras, cb);
-            if( "command_example".equalsIgnoreCase(command) ) {
-            }
-        }
-
-        @Override
-        public void onSeekTo(long pos) {
-            super.onSeekTo(pos);
-        }
     };
 
-    private void initMediaSessionMetadata() {
-        MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder();
-        //Notification icon in card
-        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
-        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
+    private void showPlayingNotification() {
+        NotificationCompat.Builder builder = MediaStyleHelper.from(BackgroundAudioService.this, mediaSessionCompat);
+        if( builder == null ) {
+            return;
+        }
 
-        //lock screen icon for pre lollipop
-        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
-        metadataBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, "Display Title");
-        metadataBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, "Display Subtitle");
-        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_TRACK_NUMBER, 1);
-        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_NUM_TRACKS, 1);
 
-        mediaSessionCompat.setMetadata(metadataBuilder.build());
+        builder.addAction(new NotificationCompat.Action(android.R.drawable.ic_media_pause, "Pause", MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY_PAUSE)));
+        builder.setStyle(new NotificationCompat.MediaStyle().setShowActionsInCompactView(0).setMediaSession(mediaSessionCompat.getSessionToken()));
+        builder.setSmallIcon(R.mipmap.ic_launcher);
+        NotificationManagerCompat.from(BackgroundAudioService.this).notify(1, builder.build());
     }
 
     private void showPausedNotification() {
@@ -205,30 +185,52 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
         mediaSessionCompat.setPlaybackState(playbackstateBuilder.build());
     }
 
-    private void showPlayingNotification() {
-        NotificationCompat.Builder builder = MediaStyleHelper.from(BackgroundAudioService.this, mediaSessionCompat);
-        if( builder == null ) {
-            return;
-        }
+    private void initMediaSessionMetadata() {
+        MediaMetadataCompat.Builder metadataBuilder = new MediaMetadataCompat.Builder();
+        //Notification icon in card
+        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
+        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
 
-        builder.addAction(new NotificationCompat.Action(android.R.drawable.ic_media_pause, "Pause", MediaButtonReceiver.buildMediaButtonPendingIntent(this, PlaybackStateCompat.ACTION_PLAY_PAUSE)));
-        builder.setStyle(new NotificationCompat.MediaStyle().setShowActionsInCompactView(0).setMediaSession(mediaSessionCompat.getSessionToken()));
-        builder.setSmallIcon(R.mipmap.ic_launcher);
-        NotificationManagerCompat.from(BackgroundAudioService.this).notify(1, builder.build());
+        //lock screen icon for pre lollipop
+        metadataBuilder.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, BitmapFactory.decodeResource(getResources(), R.mipmap.ic_launcher));
+        metadataBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_TITLE, "Beo Dat May Troi");
+        metadataBuilder.putString(MediaMetadataCompat.METADATA_KEY_DISPLAY_SUBTITLE, "Singer: Anh Tho");
+        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_TRACK_NUMBER, 1);
+        metadataBuilder.putLong(MediaMetadataCompat.METADATA_KEY_NUM_TRACKS, 1);
+
+        mediaSessionCompat.setMetadata(metadataBuilder.build());
     }
 
     private boolean successfullyRetrievedAudioFocus() {
         AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        int result = audioManager.requestAudioFocus(this, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
+
+        int result = audioManager.requestAudioFocus(this,
+                AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN);
 
         return result == AudioManager.AUDIOFOCUS_GAIN;
     }
 
+
+    @Nullable
     @Override
-    public void onAudioFocusChange(int i) {
-        switch (i) {
+    public BrowserRoot onGetRoot(@NonNull String clientPackageName, int clientUid, @Nullable Bundle rootHints) {
+        if(TextUtils.equals(clientPackageName, getPackageName())) {
+            return new BrowserRoot(getString(R.string.app_name), null);
+        }
+
+        return null;
+    }
+
+    @Override
+    public void onLoadChildren(@NonNull String parentId, @NonNull Result<List<MediaBrowserCompat.MediaItem>> result) {
+        result.sendResult(null);
+    }
+
+    @Override
+    public void onAudioFocusChange(int focusChange) {
+        switch( focusChange ) {
             case AudioManager.AUDIOFOCUS_LOSS: {
-                if (mediaPlayer.isPlaying()) {
+                if( mediaPlayer.isPlaying() ) {
                     mediaPlayer.stop();
                 }
                 break;
@@ -238,14 +240,14 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
                 break;
             }
             case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: {
-                if (mediaPlayer != null) {
+                if( mediaPlayer != null ) {
                     mediaPlayer.setVolume(0.3f, 0.3f);
                 }
                 break;
             }
             case AudioManager.AUDIOFOCUS_GAIN: {
-                if (mediaPlayer != null) {
-                    if (!mediaPlayer.isPlaying()) {
+                if( mediaPlayer != null ) {
+                    if( !mediaPlayer.isPlaying() ) {
                         mediaPlayer.start();
                     }
                     mediaPlayer.setVolume(1.0f, 1.0f);
@@ -266,15 +268,5 @@ public class BackgroundAudioService extends MediaBrowserServiceCompat implements
     public int onStartCommand(Intent intent, int flags, int startId) {
         MediaButtonReceiver.handleIntent(mediaSessionCompat, intent);
         return super.onStartCommand(intent, flags, startId);
-    }
-
-    @Override
-    public void onDestroy() {
-        super.onDestroy();
-        AudioManager audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        audioManager.abandonAudioFocus(this);
-        unregisterReceiver(broadcastReceiver);
-        mediaSessionCompat.release();
-        NotificationManagerCompat.from(this).cancel(1);
     }
 }
